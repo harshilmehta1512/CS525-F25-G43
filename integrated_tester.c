@@ -58,13 +58,13 @@ static SM_PageHandle alloc_page_or_die(const char *why) {
 }
 
 /* --------------------------------------------------------------------------
-   Extended tests (different names/flow than your friend's version)
+   Extended tests 
    -------------------------------------------------------------------------- */
 
 /* Test A: Ensure capacity jump, write the final page, read it back via readLastBlock */
 static void test_capacity_jump_and_tail_io(void) {
     const char *fname = "sm_ext_A.bin";
-    const int   want_pages = 9;   /* deliberately different constants & flow */
+    const int   want_pages = 9;   
     SM_FileHandle fh;
 
     testName = "A: ensureCapacity + write/read last page";
@@ -92,10 +92,11 @@ static void test_capacity_jump_and_tail_io(void) {
 
     TEST_DONE();
 }
+
 /* Test B: Append several pages stepwise; verify an interior page & cursor behavior */
 static void test_append_growth_and_random_access(void) {
     const char *fname = "sm_ext_B.bin";
-    const int   to_append = 7;    /* number of *extra* pages to add */
+    const int   to_append = 7;  
     SM_FileHandle fh;
 
     testName = "B: appendEmptyBlock growth + interior page verification";
@@ -134,7 +135,7 @@ static void test_append_growth_and_random_access(void) {
 }
 
 /* --------------------------------------------------------------------------
-   Simple runner: execute baseline suite then our custom extensions
+   Simple runner
    -------------------------------------------------------------------------- */
 
 static int run_baseline_suite(void) {
@@ -158,7 +159,7 @@ int main(void) {
     /* 1) Baseline tests (provided by the assignment) */
     rc |= run_baseline_suite();
 
-    /* 2) Our additional tests (unique structure & wording) */
+    /* 2) Our additional tests  */
     rc |= run_extended_suites();
 
     return rc;

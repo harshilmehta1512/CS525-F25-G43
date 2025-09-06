@@ -86,7 +86,6 @@ static RC write_zero_page(FILE *fp) {
         return RC_WRITE_FAILED;
     }
     if (fflush(fp) != 0) {
-        /* Not fatal on all platforms, but treat as failure for assignment strictness */
         RC_message = "flush failed after write";
         return RC_WRITE_FAILED;
     }
@@ -94,16 +93,127 @@ static RC write_zero_page(FILE *fp) {
 }
 
 
+/* --------------------------------------------------------------------------
+   Public API
+   -------------------------------------------------------------------------- */
 
+void initStorageManager(void) {
+    /* Nothing to initialize globally in this implementation. */
+}
 
+/* Create a new page file with exactly one zero-filled page. */
+RC createPageFile(char *fileName) {
+    FILE *fp = fopen(fileName, "wb+");     /* binary mode for portability */
+    if (fp == NULL) {
+        RC_message = "unable to create file";
+        return RC_WRITE_FAILED;
+    }
 
+    RC rc = write_zero_page(fp);
+    int close_rc = fclose(fp);
 
+    if (rc != RC_OK) return rc;
+    if (close_rc != 0) {
+        RC_message = "failed to close newly created file";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    return RC_OK;
+}
 
+/* Open an existing page file and populate the handle. */
+RC openPageFile(char *fileName, SM_FileHandle *fHandle) {
+    if (fHandle == NULL) {
+        RC_message = "file handle argument is NULL";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
 
+    FILE *fp = fopen(fileName, "rb+");     /* must be readable & writable */
+    if (fp == NULL) {
+        RC_message = "file not found";
+        return RC_FILE_NOT_FOUND;
+    }
 
+    SM_Internal *meta = (SM_Internal *)malloc(sizeof *meta);
+    if (meta == NULL) {
+        fclose(fp);
+        RC_message = "out of memory for mgmtInfo";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    meta->fp = fp;
 
+    fHandle->fileName      = fileName;
+    fHandle->mgmtInfo      = meta;
+    fHandle->curPagePos    = 0;
 
+    RC rc = refresh_page_count(fHandle);
+    if (rc != RC_OK) {
+        /* Best-effort cleanup on failure */
+        fclose(fp);
+        free(meta);
+        fHandle->mgmtInfo = NULL;
+        return rc;
+    }
+    return RC_OK;
+}
 
+/* Close an open page file. */
+RC closePageFile(SM_FileHandle *fHandle) {
+    if (fHandle == NULL || fHandle->mgmtInfo == NULL) {
+        RC_message = "file handle not initialized";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    SM_Internal *meta = (SM_Internal *)fHandle->mgmtInfo;
+    FILE *fp = meta->fp;
+
+    int rc = fclose(fp);
+    /* Clear pointers even if fclose fails to avoid reuse; report error, though. */
+    meta->fp = NULL;
+    free(meta);
+    fHandle->mgmtInfo = NULL;
+
+    if (rc != 0) {
+        RC_message = "closing file failed";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    return RC_OK;
+}
+
+/* Delete a page file from disk. */
+RC destroyPageFile(char *fileName) {
+    if (remove(fileName) != 0) {
+        RC_message = "remove failed (file missing or in use)";
+        return RC_FILE_NOT_FOUND;
+    }
+    return RC_OK;
+}
+
+/* Read the page with absolute page number into memPage. */
+RC readBlock(int pageNum, SM_FileHandle *fHandle, SM_PageHandle memPage) {
+    if (fHandle == NULL || memPage == NULL) {
+        RC_message = "invalid arguments to readBlock";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    FILE *fp;
+    RC rc = get_stream(fHandle, &fp);
+    if (rc != RC_OK) return rc;
+
+    if (pageNum < 0 || pageNum >= fHandle->totalNumPages) {
+        RC_message = "page number out of range";
+        return RC_READ_NON_EXISTING_PAGE;
+    }
+
+    rc = move_to_page(fp, pageNum);
+    if (rc != RC_OK) return rc;
+
+    size_t got = fread(memPage, sizeof(char), PAGE_SIZE, fp);
+    if (got != PAGE_SIZE) {
+        RC_message = "incomplete page read";
+        return RC_READ_NON_EXISTING_PAGE;
+    }
+
+    fHandle->curPagePos = pageNum;
+    return RC_OK;
+}
 /* Return current page index (or -1 if the handle isn't usable). */
 int getBlockPos(SM_FileHandle *fHandle) {
     if (fHandle == NULL || fHandle->mgmtInfo == NULL)
@@ -169,9 +279,9 @@ RC readLastBlock(SM_FileHandle *fHandle, SM_PageHandle memPage) {
     return readBlock(last, fHandle, memPage);
 }
 
-/* Write a page at an absolute page number (restructured guards & flow) */
+/* Write a page at an absolute page number  */
 RC writeBlock(int pageNum, SM_FileHandle *fHandle, SM_PageHandle memPage) {
-    /* combined null checks to differ structurally */
+    
     if (!(fHandle && memPage))
         return RC_FILE_HANDLE_NOT_INIT;
 
@@ -197,5 +307,52 @@ RC writeBlock(int pageNum, SM_FileHandle *fHandle, SM_PageHandle memPage) {
     }
 
     fHandle->curPagePos = pageNum;
+    return RC_OK;
+}
+
+/* Write the page at the current position (does not move the cursor). */
+RC writeCurrentBlock(SM_FileHandle *fHandle, SM_PageHandle memPage) {
+    if (fHandle == NULL) {
+        RC_message = "file handle not initialized";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    return writeBlock(fHandle->curPagePos, fHandle, memPage);
+}
+
+/* Append one zero-filled page at EOF; do not change curPagePos. */
+RC appendEmptyBlock(SM_FileHandle *fHandle) {
+    if (fHandle == NULL) {
+        RC_message = "file handle not initialized";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    FILE *fp;
+    RC rc = get_stream(fHandle, &fp);
+    if (rc != RC_OK) return rc;
+
+    if (fseek(fp, 0L, SEEK_END) != 0) {
+        RC_message = "seek to end failed";
+        return RC_WRITE_FAILED;
+    }
+    rc = write_zero_page(fp);
+    if (rc != RC_OK) return rc;
+
+    fHandle->totalNumPages += 1;
+    return RC_OK;
+}
+
+/* Ensure file has at least numberOfPages pages by appending zeros. */
+RC ensureCapacity(int numberOfPages, SM_FileHandle *fHandle) {
+    if (fHandle == NULL) {
+        RC_message = "file handle not initialized";
+        return RC_FILE_HANDLE_NOT_INIT;
+    }
+    if (numberOfPages <= fHandle->totalNumPages) {
+        return RC_OK;
+    }
+    /* Append until the requested capacity is met. */
+    while (fHandle->totalNumPages < numberOfPages) {
+        RC rc = appendEmptyBlock(fHandle);
+        if (rc != RC_OK) return rc;
+    }
     return RC_OK;
 }
